@@ -18,10 +18,13 @@ import {
   PerspectiveCamera,
 } from '@theatre/r3f'
 import Enveremnt from './Enveremnt.jsx'
-import studio from '@theatre/studio'
-import extension from '@theatre/r3f/dist/extension'
-studio.initialize()
-studio.extend(extension)
+
+
+// import studio from '@theatre/studio'
+// import extension from '@theatre/r3f/dist/extension'
+
+// studio.initialize()
+// studio.extend(extension)
 
 // -----------------------/component/------------
 import WaterScene from './component/WaterScene.jsx'
