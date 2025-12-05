@@ -6,128 +6,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ThreeJs Project by Biswajit Halder</title>
     <link rel="shortcut icon" href="/favicon.ico" />
-    <style>
-      :root { --ring:#f1b24a; --track:#26292e; --bg:#0b0f14; --txt:#c8d0d9; }
-      #global-loader{ transition:opacity .6s ease, visibility .6s ease; }
-      #global-loader.hide{ opacity:0; visibility:hidden; pointer-events:none; }
-      .gl-ring{ box-shadow:0 0 0 1px rgba(255,255,255,.06) inset; }
-      .gl-hole{ box-shadow:0 0 0 1px rgba(255,255,255,.05) inset; }
-    </style>
+    
   </head>
-  <body class="bg-black">
-    <div id="global-loader" class="z-[999999] fixed inset-0 flex justify-center items-center bg-[#0b0f14]">
-      <div class="flex flex-col items-center gap-6">
-        <!-- METER (circle + number). Hidden when ready -->
-        <div id="gl-meter" class="flex flex-col items-center gap-4">
-          <div id="gl-ring" class="relative rounded-full gl-ring w-[112px] h-[112px]"
-               style="background:conic-gradient(var(--ring) 0deg, var(--track) 0deg);">
-            <div class="absolute inset-[10px] bg-[#0e141b] rounded-full gl-hole"></div>
-            <div id="gl-label"
-                 class="absolute inset-0 place-items-center grid font-semibold text-[18px] text-slate-200 transition-opacity duration-300 select-none">0</div>
-          </div>
-        </div>
+  <body >
 
-        <!-- COMPLETE button (only after truly ready) -->
-        <button id="gl-complete"
-          class="opacity-0 px-10 py-3 border border-[#f1b24a]/90 rounded-full font-semibold text-[#f1b24a] tracking-widest transition-opacity duration-300 pointer-events-none select-none">
-          COMPLETE
-        </button>
-      </div>
-    </div>
+    <div id="root"  ></div>
+</body>
 
-    <div id="root" class="opacity-0"></div>
-
-
-    <script>
-
-      
-      // Stage-1 + Shared Loader API
-      (function () {
-        const overlay  = document.getElementById('global-loader');
-        const meter    = document.getElementById('gl-meter');
-        const ring     = document.getElementById('gl-ring');
-        const labelEl  = document.getElementById('gl-label');
-        const btn      = document.getElementById('gl-complete');
-
-        window.__OVERLAY_LOCKED__ = true;
-        window.__AUTO_PROCEED_MS__ = 3000;
-
-        let progress = 0;            // current shown %
-        let target   = 0;            // target %
-        let lastT    = performance.now();
-        const MAX_RATE = 60;         // % per second (controls speed; smaller = slower, tied to real progress)
-        let autoTimer = null;
-        let pendingCompleteSwap = false; // wait until meter hits 100
-        let canProceed = false;
-
-        function set(p){
-          progress = Math.max(0, Math.min(100, p));
-          const deg = progress * 3.6;
-          ring.style.background = `conic-gradient(var(--ring) ${deg}deg, var(--track) 0deg)`;
-          labelEl.textContent = `${Math.round(progress)}`;
-        }
-
-
-        function loop(now){
-          const dt = Math.min(0.1, (now - lastT) / 1000); // clamp dt
-          lastT = now;
-
-          // linear follow toward target with capped speed (monotonic, no jitter)
-          if (progress < target) {
-            const step = MAX_RATE * dt; // max percent we can advance this frame
-            set(Math.min(target, progress + step));
-          }
-
-          // when meter visually reaches 100 AND we asked to show button, swap now
-          if (pendingCompleteSwap && progress >= 100) {
-            pendingCompleteSwap = false;
-            canProceed = true;
-            meter.style.opacity = 0;
-            meter.style.visibility = 'hidden';
-            meter.style.pointerEvents = 'none';
-            btn.classList.remove('pointer-events-none');
-            btn.style.opacity = 1;
-            clearTimeout(autoTimer);
-            autoTimer = setTimeout(() => proceed(), window.__AUTO_PROCEED_MS__ || 3000);
-          }
-
-          requestAnimationFrame(loop);
-        }
-
-        function aim(t){ target = Math.max(target, Math.min(100, t)); } // never go backwards
-
-        function requestCompleteSwap() {
-          // ask to swap to COMPLETE, but only after meter truly shows 100
-          aim(100);
-          pendingCompleteSwap = true;
-        }
-
-        function proceed(){
-          if (!canProceed) return; // block premature clicks
-          clearTimeout(autoTimer);
-          window.__OVERLAY_LOCKED__ = false;
-          window.dispatchEvent(new CustomEvent("APP_LOADER_DONE"));
-          overlay.classList.add('hide');
-        }
-
-        // Public API for React
-        window.__LOADER__ = {
-          aim,                                  // set target progress (monotonic)
-          requestCompleteSwap,                  // call when assets are fully ready
-          proceed,                              // manual click
-          value: () => progress,
-          setAuto: (ms)=> (window.__AUTO_PROCEED_MS__ = +ms || 3000)
-        };
-
-        // Boot: aim to 50% during initial HTML stage
-        set(0);
-        target = 50;
-        requestAnimationFrame((t)=>{ lastT = t; loop(t); });
-
-        btn.addEventListener('click', proceed);
-      })();
-    </script>
-
+ 
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

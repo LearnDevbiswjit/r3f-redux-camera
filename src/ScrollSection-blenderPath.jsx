@@ -17,14 +17,12 @@ import SpringPath from './SpringPath.jsx'
 import { Leva, useControls, monitor } from 'leva'
 
 /* ---------------- small helpers & config ---------------- */
-const PAGES = 12
+const PAGES = 8
 const DEFAULT_FORCED_BLEND_MS = 500
 const DEFAULT_FADE_EXIT_MS = 500
-const DEFAULT_FADE_HOLD_MS = 120
+const DEFAULT_FADE_HOLD_MS = 20
 const DEFAULT_FADE_COOLDOWN_MS = 300
-const DEFAULT_END_THRESHOLD = 0.98 // consider "end" when offset >= this (or <= 1 - this for reverse)
 
-/* ---------------- Helix fallback ---------------- */
 class HelixCurve extends THREE.Curve {
   constructor ({ turns = 1, radius = 1, height = 1 } = {}) {
     super()
@@ -72,17 +70,14 @@ export default function ScrollSection () {
   const sheet = project.sheet('Scene')
 
   const isMobile = typeof window !== 'undefined' && window.innerWidth <= 768
-  const pages = isMobile ? 13 : PAGES
+  const pages = isMobile ? 9 : PAGES
 
   // Leva small fade controls (keep minimal)
-  const { forcedBlendMs, fadeExitMs, fadeHoldMs, fadeCooldownMs, requireEnd, endThreshold, reverseStart } = useControls('Fade', {
+  const { forcedBlendMs, fadeExitMs, fadeHoldMs, fadeCooldownMs } = useControls('Fade', {
     forcedBlendMs: { value: DEFAULT_FORCED_BLEND_MS, min: 50, max: 3000, step: 10 },
     fadeExitMs: { value: DEFAULT_FADE_EXIT_MS, min: 50, max: 3000, step: 10 },
     fadeHoldMs: { value: DEFAULT_FADE_HOLD_MS, min: 0, max: 2000, step: 10 },
-    fadeCooldownMs: { value: DEFAULT_FADE_COOLDOWN_MS, min: 0, max: 2000, step: 10 },
-    requireEnd: { value: true },
-    endThreshold: { value: DEFAULT_END_THRESHOLD, min: 0.7, max: 0.999, step: 0.001 },
-    reverseStart: { value: false }
+    fadeCooldownMs: { value: DEFAULT_FADE_COOLDOWN_MS, min: 0, max: 2000, step: 10 }
   })
 
   return (
@@ -101,14 +96,7 @@ export default function ScrollSection () {
           <WaterScene />
           <ScrollControls pages={pages} distance={3} damping={0.15}>
             <SheetProvider sheet={sheet}>
-              <Scene
-                sheet={sheet}
-                fadeHoldMs={fadeHoldMs}
-                fadeCooldownMs={fadeCooldownMs}
-                requireEnd={requireEnd}
-                endThreshold={endThreshold}
-                reverseStart={reverseStart}
-              />
+              <Scene sheet={sheet} />
             </SheetProvider>
             <Scroll html style={{ position: 'absolute', width: '100vw' }} />
           </ScrollControls>
@@ -119,7 +107,7 @@ export default function ScrollSection () {
 }
 
 /* ---------------- Scene which uses global blender curve if present ---------------- */
-function Scene ({ sheet, fadeHoldMs, fadeCooldownMs, requireEnd = true, endThreshold = DEFAULT_END_THRESHOLD, reverseStart = false }) {
+function Scene ({ sheet }) {
   const scroll = useScroll()
   const { set } = useThree()
 
@@ -139,36 +127,6 @@ function Scene ({ sheet, fadeHoldMs, fadeCooldownMs, requireEnd = true, endThres
   // helix fallback used for bricks visuals (SpringPath draws bricks)
   const helixCurve = useMemo(() => new HelixCurve({ turns: 0.95, radius: 7.0, height: 10 }), [])
 
-  // tune: how long scroll must be stable before we consider springPath "finished"
-  const stableHoldMs = Math.max(20, fadeHoldMs || DEFAULT_FADE_HOLD_MS) // default safe guard
-  const toggleCooldownMs = Math.max(50, fadeCooldownMs || DEFAULT_FADE_COOLDOWN_MS) // minimum time between toggles
-
-  // thresholds for movement detection (velocity-based + small absolute delta)
-  const velEntryThreshold = 0.0008   // when abs(velocity) > this => consider "moving"
-  const velExitThreshold = 0.0003    // when abs(velocity) < this => candidate for "settled"
-  const absDeltaEntry = 0.0006       // small absolute change qualifies as movement entry
-
-  // internal state to detect movement / stable
-  const lastOffsetRef = useRef(0)
-  const lastTimeRef = useRef(performance.now())
-  const stableSinceRef = useRef(performance.now())
-  const springActiveRef = useRef(false)
-  const springFinishedRef = useRef(false)
-  const lastToggleTimeRef = useRef(0)
-  const lastDirectionRef = useRef(0) // +1 forward, -1 backward, 0 unknown
-
-  // expose state for debugging & external control (only update on change)
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-      window._springPathState = { active: false, finished: false, offset: 0 }
-    }
-    return () => {
-      if (typeof window !== 'undefined') {
-        delete window._springPathState
-      }
-    }
-  }, [])
-
   // map scroll to theatre (only when theatre not suppressed)
   useFrame(() => {
     if (!sheet || !scroll) return
@@ -180,96 +138,12 @@ function Scene ({ sheet, fadeHoldMs, fadeCooldownMs, requireEnd = true, endThres
     } catch (e) {}
   })
 
-  // camera follow loop + robust spring-path -> theatre suppression / finish detection
+  // camera follow loop: use window._springBlenderCurve (set by SpringPath) if available, else use helix
   useFrame((state) => {
     if (!scroll || !cameraRef.current) return
     const rawOffset = THREE.MathUtils.clamp(scroll.offset, 0, 1)
-    const t = reverseStart ? (1 - rawOffset) : rawOffset
+    const t = rawOffset
 
-    const now = performance.now()
-    const dt = Math.max(1e-3, (now - lastTimeRef.current) / 1000) // seconds
-    // velocity estimate
-    const vel = (rawOffset - lastOffsetRef.current) / dt
-    const absVel = Math.abs(vel)
-    const absDelta = Math.abs(rawOffset - lastOffsetRef.current)
-
-    // determine current scroll direction
-    if (absDelta > 1e-6) {
-      lastDirectionRef.current = (rawOffset > lastOffsetRef.current) ? 1 : -1
-    }
-
-    // decide movement
-    const isMoving = (absVel > velEntryThreshold) || (absDelta > absDeltaEntry)
-    // candidate for settled
-    const maybeSettled = (absVel < velExitThreshold) && (absDelta < absDeltaEntry)
-
-    // Enforce a minimal cooldown between toggles to avoid chatter
-    const sinceLastToggle = now - (lastToggleTimeRef.current || 0)
-
-    if (isMoving) {
-      stableSinceRef.current = now
-      // activate if not already and cooldown passed
-      if (!springActiveRef.current && sinceLastToggle >= toggleCooldownMs) {
-        springActiveRef.current = true
-        springFinishedRef.current = false
-        lastToggleTimeRef.current = now
-        window._springSuppressTheatreResume = true
-        if (typeof window !== 'undefined') {
-          window._springPathState = { active: true, finished: false, offset: rawOffset }
-        }
-        console.log('[Spring] activity started — suppressing Theatre resume')
-      } else {
-        // just update offset
-        if (typeof window !== 'undefined' && window._springPathState && window._springPathState.active) {
-          window._springPathState.offset = rawOffset
-        }
-      }
-    } else {
-      // candidate for settled — require it to be held for stableHoldMs
-      const heldMs = now - stableSinceRef.current
-
-      // NEW: only mark finished if either requireEnd==false OR offset is near end (for direction)
-      let atEnd = false
-      if (!requireEnd) {
-        atEnd = true
-      } else {
-        // if user was scrolling forward, require offset >= endThreshold
-        // if scrolling backward, require offset <= (1 - endThreshold)
-        const dir = lastDirectionRef.current || 1
-        if (dir >= 0) {
-          atEnd = rawOffset >= endThreshold
-        } else {
-          atEnd = rawOffset <= (1 - endThreshold)
-        }
-      }
-
-      if (springActiveRef.current && !springFinishedRef.current && maybeSettled && heldMs >= stableHoldMs && sinceLastToggle >= toggleCooldownMs) {
-        if (atEnd) {
-          // consider springPath finished (scroll settled at end)
-          springFinishedRef.current = true
-          springActiveRef.current = false
-          lastToggleTimeRef.current = now
-          window._springSuppressTheatreResume = false
-          if (typeof window !== 'undefined') {
-            window._springPathState = { active: false, finished: true, offset: rawOffset }
-          }
-          console.log('[Spring] settled at end — releasing Theatre resume (spring finished)')
-        } else {
-          // still settled but not at path-end: keep spring active (do not release theatre)
-          if (typeof window !== 'undefined') {
-            window._springPathState = { active: true, finished: false, offset: rawOffset }
-          }
-          // reset stableSince to avoid repeating logs until further movement
-          stableSinceRef.current = now
-        }
-      }
-    }
-
-    // update last values
-    lastOffsetRef.current = rawOffset
-    lastTimeRef.current = now
-
-    // --- CAMERA FOLLOW (existing logic) ---
     const camCurve = (typeof window !== 'undefined' && window._springBlenderCurve) ? window._springBlenderCurve : helixCurve
     const pathScale = 5
     // sample point+tangent
@@ -282,16 +156,13 @@ function Scene ({ sheet, fadeHoldMs, fadeCooldownMs, requireEnd = true, endThres
     const tangent = new THREE.Vector3()
     if (camCurve.getTangentAt) camCurve.getTangentAt(t, tangent)
     else {
-      const eps2 = 1 / 1000
-      const t0 = Math.max(0, t - eps2), t1 = Math.min(1, t + eps2)
+      const eps = 1 / 1000
+      const t0 = Math.max(0, t - eps), t1 = Math.min(1, t + eps)
       const p0 = new THREE.Vector3(), p1 = new THREE.Vector3()
       camCurve.getPointAt ? camCurve.getPointAt(t0, p0) : camCurve.getPoint(t0, p0)
       camCurve.getPointAt ? camCurve.getPointAt(t1, p1) : camCurve.getPoint(t1, p1)
       tangent.copy(p1).sub(p0).normalize()
     }
-
-    // if reverseStart is true, tangent direction should be flipped for yaw calculation
-    if (reverseStart) tangent.negate()
 
     // desired camera position: slight outward offset based on radial
     const radial = new THREE.Vector3(point.x, 0, point.z).normalize()
@@ -354,7 +225,6 @@ function Scene ({ sheet, fadeHoldMs, fadeCooldownMs, requireEnd = true, endThres
             downAmplitude={7}
             frontHold={1}
             curvatureEnabled={true}
-            reverseStart={reverseStart}
           />
         </e.group>
 
