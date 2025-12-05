@@ -6,7 +6,7 @@ import { useSelector } from 'react-redux'
 import { useRegistry } from '../registry/TimelineRegistryContext'
 import Briks from '../Briks' // adjust path if necessary
 
-function makeHelixPoints({ turns = 2, height = 80, radius = 18, points = 2000 }) {
+function makeHelixPoints({ turns = 2, height = 80, radius = 10, points = 2000 }) {
   const arr = []
   for (let i = 0; i <= points; i++) {
     const t = i / points
@@ -55,7 +55,7 @@ function mapArcToU(lut, arcNorm) {
 }
 
 export default function CameraRig({
-  initialHelixConfig = { turns: 10, height: 80, radius: 18, points: 2000 },
+  initialHelixConfig = { turns: 1, height: 80, radius: 20, points: 2000 },
   lutSamples = 1500
 }) {
   const { camera } = useThree()
