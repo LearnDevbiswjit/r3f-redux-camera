@@ -1,3 +1,4 @@
+// src/App.jsx
 import React, { useEffect, useState } from 'react';
 import { Provider } from 'react-redux';
 import { Canvas } from '@react-three/fiber';
@@ -6,6 +7,7 @@ import { getProject } from '@theatre/core';
 import { Leva } from 'leva';
  
 
+import theatreStateBundled from './assets/theatreState.json'; // <-- ensure this exists
 import { store } from './store/store';
 import { RegistryProvider, useRegistry } from './registry/TimelineRegistryContext';
 import CameraRig from './components/CameraRig';
@@ -18,26 +20,31 @@ import StudioManager from './StudioManager';
 import { registerSimulatedTheatre } from './theatre/bootstrapRegisterSimulated';
 import { registerSheetTimelines } from './theatre/autoRegisterSheet';
 
-// ensure minimal theatre sheet early for @theatre/r3f
+import * as THREE from 'three';
+
+// ------------------ ENSURE THEATRE PROJECT + SHEET (state injected if available) ------------------
 let initialProject = null;
 let initialSheet = null;
 if (typeof window !== 'undefined') {
   try {
-    initialProject = getProject('myProject');
+    const stateToLoad = window.__THEATRE_REMOTE_STATE__ || theatreStateBundled || null;
+    if (stateToLoad) {
+      initialProject = getProject('myProject', { state: stateToLoad });
+    } else {
+      initialProject = getProject('myProject');
+    }
     initialSheet = initialProject.sheet('Scene');
     window.__THEATRE_PROJECT__ = window.__THEATRE_PROJECT__ || initialProject;
     window.__THEATRE_SHEET__ = window.__THEATRE_SHEET__ || initialSheet;
-    console.info('[App] initial Theatre project+sheet ensured');
+    console.info('[App] initial Theatre project+sheet ensured (state injected?)');
   } catch (e) {
     console.warn('[App] could not create initial Theatre project/sheet:', e?.message || e);
   }
 }
 
-// SheetBinder: keeps SheetProvider stable when sheet becomes available
+// ---------------- BIND SHEET DYNAMICALLY ----------------
 function SheetBinder({ children }) {
-  const [sheet, setSheet] = useState(() => {
-    return typeof window !== 'undefined' ? window.__THEATRE_SHEET__ || null : null;
-  });
+  const [sheet, setSheet] = useState(() => (typeof window !== 'undefined' ? window.__THEATRE_SHEET__ || null : null));
 
   useEffect(() => {
     let mounted = true;
@@ -60,7 +67,62 @@ function SheetBinder({ children }) {
   return <SheetProvider sheet={providerSheet}>{children}</SheetProvider>;
 }
 
-// TimelineBootstrap: registers timelines (or simulated fallback)
+// ---------------- extractor helper ----------------
+function extractCameraFromState(state) {
+  if (!state || typeof state !== 'object') return null;
+  if (state.camera && state.camera.position && state.camera.quaternion) return { pos: state.camera.position, quat: state.camera.quaternion };
+  if (state.timeline && state.timeline.camera && state.timeline.camera.position && state.timeline.camera.quaternion) return { pos: state.timeline.camera.position, quat: state.timeline.camera.quaternion };
+
+  try {
+    const sb = state.sheetsById;
+    if (sb && typeof sb === 'object') {
+      for (const sid in sb) {
+        if (!Object.prototype.hasOwnProperty.call(sb, sid)) continue;
+        const sheet = sb[sid];
+        if (!sheet) continue;
+        const so = sheet.staticOverrides || sheet.static || sheet.staticValues || null;
+        if (so && so.byObject && so.byObject.Camera) {
+          const camObj = so.byObject.Camera;
+          if (camObj.transform && camObj.transform.position && camObj.transform.quaternion) {
+            return { pos: camObj.transform.position, quat: camObj.transform.quaternion };
+          }
+          if (camObj.position && camObj.quaternion) {
+            return { pos: camObj.position, quat: camObj.quaternion };
+          }
+          if (camObj.transform && camObj.transform.position && camObj.transform.target) {
+            try {
+              const p = new THREE.Vector3(camObj.transform.position.x, camObj.transform.position.y, camObj.transform.position.z);
+              const t = new THREE.Vector3(camObj.transform.target.x, camObj.transform.target.y, camObj.transform.target.z);
+              const m = new THREE.Matrix4(); m.lookAt(p, t, new THREE.Vector3(0,1,0));
+              const q = new THREE.Quaternion().setFromRotationMatrix(m);
+              return { pos: camObj.transform.position, quat: { x: q.x, y: q.y, z: q.z, w: q.w } };
+            } catch (e) { /* ignore */ }
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[extractCameraFromState] parse error', e?.message || e);
+  }
+
+  try {
+    const walker = (o) => {
+      if (!o || typeof o !== 'object') return null;
+      if (o.position && o.quaternion) return { pos: o.position, quat: o.quaternion };
+      for (const k in o) {
+        if (!Object.prototype.hasOwnProperty.call(o, k)) continue;
+        const r = walker(o[k]);
+        if (r) return r;
+      }
+      return null;
+    };
+    return walker(state);
+  } catch (e) { /* ignore */ }
+
+  return null;
+}
+
+// ---------------- TIMELINE BOOTSTRAP ----------------
 function TimelineBootstrap() {
   const registry = useRegistry();
 
@@ -68,46 +130,64 @@ function TimelineBootstrap() {
     let cancelled = false;
 
     async function tryRegister() {
+      if (cancelled) return;
       const sheet = typeof window !== 'undefined' ? window.__THEATRE_SHEET__ : null;
 
-      // Try to load public/theatreState.json if available (used in production)
+      // try fetching public/theatreState.json (deployed)
       let remoteState = null;
       try {
         const res = await fetch('/theatreState.json', { cache: 'no-cache' });
         if (res.ok) {
           remoteState = await res.json();
-          console.info('[TimelineBootstrap] loaded theatreState.json');
+          console.info('[TimelineBootstrap] fetched /theatreState.json');
+        } else {
+          console.info('[TimelineBootstrap] /theatreState.json not served (status)', res.status);
         }
       } catch (err) {
-        // ignore fetch errors
+        // ignore
+      }
+
+      // fallback to global/bundled
+      if (!remoteState) {
+        remoteState = window.__THEATRE_REMOTE_STATE__ || theatreStateBundled || null;
+      }
+
+      if (remoteState) {
+        const cam = extractCameraFromState(remoteState);
+        if (cam) {
+          window.__THEATRE_REMOTE_STATE__ = remoteState;
+          window.__THEATRE_STATIC_CAMERA__ = cam;
+          window.__THEATRE_B_START_CAMERA__ = window.__THEATRE_B_START_CAMERA__ || cam;
+          if (remoteState.durations) window.__THEATRE_REMOTE_DURATIONS__ = remoteState.durations;
+          if (remoteState.timeline && remoteState.timeline.durations) window.__THEATRE_REMOTE_DURATIONS__ = remoteState.timeline.durations;
+        } else {
+          window.__THEATRE_REMOTE_STATE__ = remoteState;
+        }
       }
 
       const st = store.getState();
       const durationsFromStore = (st && st.timeline && st.timeline.durations) ? st.timeline.durations : null;
+      const finalDur = durationsFromStore || (remoteState && (remoteState.durations || (remoteState.timeline && remoteState.timeline.durations))) || { theatreA: 20*60, helix: 20*60, theatreB: 30*60 };
 
       if (sheet) {
-        registerSheetTimelines(registry, sheet, durationsFromStore || (remoteState && remoteState.durations) || { theatreA: 20*60, helix: 20*60, theatreB: 30*60 });
+        registerSheetTimelines(registry, sheet, finalDur);
       } else if (remoteState) {
-        // Pass remoteState to simulated register so app gets durations/camera initial values
         registerSimulatedTheatre(registry, remoteState);
       } else {
-        registerSimulatedTheatre(registry, { durations: durationsFromStore || { theatreA: 20*60, helix: 20*60, theatreB: 30*60 }});
+        registerSimulatedTheatre(registry, { durations: finalDur });
       }
     }
 
     tryRegister();
     const id = setInterval(tryRegister, 1000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
+    return () => { cancelled = true; clearInterval(id); };
   }, [registry]);
 
   return null;
 }
 
+// ---------------- MAIN APP ----------------
 export default function App() {
-  // Ensure Leva UI above Canvas (useful with Tailwind)
   useEffect(() => {
     const id = 'app-leva-fix';
     if (document.getElementById(id)) return;
@@ -121,86 +201,29 @@ export default function App() {
     document.head.appendChild(style);
   }, []);
 
-  // Production: preload theatreState.json and write camera/durations fallback globals (so CameraRig can apply them on mount)
   useEffect(() => {
     if (typeof window === 'undefined') return;
     if (process.env.NODE_ENV === 'production') {
-      fetch('/theatreState.json', { cache: 'no-cache' })
-        .then(res => {
-          if (!res.ok) throw new Error('no theatreState.json');
-          return res.json();
-        })
-        .then(state => {
-          // expose parsed json for CameraRig / Registry fallback
-          window.__THEATRE_REMOTE_STATE__ = state;
-
-          // optional: extract durations top-level
-          if (state && state.durations) {
-            window.__THEATRE_REMOTE_DURATIONS__ = state.durations;
-          } else if (state && state.timeline && state.timeline.durations) {
-            window.__THEATRE_REMOTE_DURATIONS__ = state.timeline.durations;
-          }
-
-          // optional: try to extract camera initial transform if exported in your json
-          // multiple theatre export shapes exist; adapt to your export format
-          try {
-            // Attempt common export shapes: state.camera or state.cameraInitial
-            const cam = state.camera || state.cameraInitial || (state.theatre && state.theatre.camera) || null;
-            if (cam && cam.position && cam.quaternion) {
-              window.__THEATRE_STATIC_CAMERA__ = {
-                pos: cam.position,
-                quat: cam.quaternion
-              };
-            } else {
-              // look for nested sheets->objects structure (some exports have nested sheets)
-              // try to locate first Camera object with position/quaternion
-              const maybeCam = findCameraInExport(state);
-              if (maybeCam) window.__THEATRE_STATIC_CAMERA__ = maybeCam;
-            }
-          } catch (e) {
-            // ignore - CameraRig will handle absence
-          }
-        })
-        .catch(() => {
-          // no JSON or parse failed - fine, fallbacks will use default durations
-        });
-    }
-  }, []);
-
-  // helper to scan common export shapes for a camera transform
-  // (keeps simple and defensive)
-  function findCameraInExport(state) {
-    if (!state || typeof state !== 'object') return null;
-    // check common spots
-    if (state.sheetsById) {
-      for (const sid in state.sheetsById) {
-        const sheet = state.sheetsById[sid];
-        if (!sheet) continue;
-        // many exports put objects under "objects" / "byId"
-        if (sheet.objects) {
-          for (const id in sheet.objects) {
-            const obj = sheet.objects[id];
-            if (obj && obj.name && /camera/i.test(obj.name) && obj.static && obj.static.position && obj.static.quaternion) {
-              return { pos: obj.static.position, quat: obj.static.quaternion };
-            }
-          }
+      if (typeof theatreStateBundled !== 'undefined' && theatreStateBundled) {
+        window.__THEATRE_REMOTE_STATE__ = theatreStateBundled;
+        const cam = extractCameraFromState(theatreStateBundled);
+        if (cam) {
+          window.__THEATRE_STATIC_CAMERA__ = cam;
+          window.__THEATRE_B_START_CAMERA__ = window.__THEATRE_B_START_CAMERA__ || cam;
+          if (theatreStateBundled.durations) window.__THEATRE_REMOTE_DURATIONS__ = theatreStateBundled.durations;
+          if (theatreStateBundled.timeline && theatreStateBundled.timeline.durations) window.__THEATRE_REMOTE_DURATIONS__ = theatreStateBundled.timeline.durations;
+          console.info('[App] applied bundled theatreState fallback (production)');
+        } else {
+          window.__THEATRE_REMOTE_STATE__ = theatreStateBundled;
         }
       }
     }
-    // fallback: look for top-level camera-like keys
-    if (state.camera && state.camera.position && state.camera.quaternion) {
-      return { pos: state.camera.position, quat: state.camera.quaternion };
-    }
-    return null;
-  }
+  }, []);
 
   return (
     <Provider store={store}>
       <RegistryProvider>
-        {/* Leva root (keep outside Canvas) */}
         <Leva collapsed={false} />
-
-        {/* Render StudioManager only in non-production so editor stays off in Netlify builds */}
         {process.env.NODE_ENV !== 'production' && <StudioManager />}
 
         <TimelineBootstrap />
